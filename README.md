@@ -143,6 +143,18 @@ Benchmarks on a real Mill project (5.8GB, 268K files, 12K directories):
 | cp -rc (APFS clone) | ~60s |
 | **Total restore** | **~60s** |
 
+### cp -rc Breakdown
+
+```
+$ time cp -rc snapshot/ out/
+
+real    0m59.342s
+user    0m0.420s    ← minimal user-space work
+sys     0m49.500s   ← bottleneck: kernel metadata creation
+```
+
+84% CPU utilization, almost entirely in kernel creating 268K inodes.
+
 ### Why APFS Clone?
 
 We benchmarked several approaches for restoring 268K files:
@@ -171,3 +183,4 @@ Compression doesn't help because:
 | Incremental | Varies | Complex to implement correctly |
 
 **Verdict**: APFS clone is optimal for this use case. The ~60s restore time is dominated by unavoidable filesystem operations.
+
