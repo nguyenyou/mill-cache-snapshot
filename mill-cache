@@ -224,6 +224,8 @@ restore() {
 
   debug "restoring from: $CACHE_DIR/$target"
 
+  local start_time=$(date +%s.%N)
+
   # Move-swap for instant restore (delete old in background)
   local old_dir="out.old.$$"
   debug "moving current out/ to $old_dir"
@@ -235,10 +237,14 @@ restore() {
   # Leave old_dir for GC to clean up later (no immediate delete)
   debug "left $old_dir for garbage collection"
 
+  local end_time=$(date +%s.%N)
+  local elapsed=$(echo "$end_time - $start_time" | bc)
+
   local short=${target:0:7}
   local msg=$(git log -1 --format=%s "$target" 2>/dev/null || echo "")
   debug "restore complete"
   echo -e "${GREEN}Restored${NC}: ${CYAN}$short${NC} - $msg"
+  echo -e "  Time: ${YELLOW}${elapsed}s${NC}"
 }
 
 list() {

@@ -1,6 +1,6 @@
 # mill-cache
 
-Fast Mill build cache using APFS clones. Snapshot and restore `out/` directories instantly.
+Fast Mill build cache using APFS clones. Snapshot and restore `out/` directories without copying data.
 
 ## Why?
 
@@ -12,28 +12,26 @@ Switching branches in a Mill project often means recompiling everything. With la
 
 ### APFS Copy-on-Write
 
-On macOS, APFS supports copy-on-write clones via `cp -c`. Cloning a 5GB directory takes milliseconds because no data is actually copied—just metadata pointers.
+On macOS, APFS supports copy-on-write clones via `cp -c`. Cloning avoids copying actual file data—only metadata is created.
 
 ```
 Snapshot: cp -rc out/ ~/.mill-out-cache/project/abc123/
 Restore:  cp -rc ~/.mill-out-cache/project/abc123/ out/
 ```
 
-Both operations are nearly instant regardless of directory size.
+Clone speed depends on file count, not size. A single large file clones in milliseconds; 268K small files take ~60s due to metadata overhead.
 
 ### Instant Restore with Move-Swap
 
 The restore operation uses a move-swap pattern for maximum speed:
 
 ```bash
-mv out out.old.$$              # instant - just renames
-cp -rc "$snapshot" out         # instant - APFS clone
+mv out out.old.$$              # ~3ms - just renames
+cp -rc "$snapshot" out         # ~60s - APFS clone (metadata creation)
 # out.old.$$ left for GC to clean later
 ```
 
-**Result: 5.8GB restored in ~15ms**
-
-The old `out/` is renamed (instant) and the snapshot is cloned (instant). The old directory is left for the garbage collector to clean up later, keeping the restore operation non-blocking.
+The old `out/` is renamed instantly, then the snapshot is cloned. The old directory is left for the garbage collector to clean up later, avoiding blocking deletion.
 
 ### Automatic Ancestor Lookup
 
@@ -137,10 +135,39 @@ GC_TARGET_DIR="/path/to/project"    # where GC looks for out.old.* dirs
 
 ## Performance
 
-| Operation | Traditional | mill-cache |
-|-----------|-------------|------------|
-| Delete 5GB out/ | ~5-10s | 0ms (moved to background) |
-| Copy 5GB snapshot | ~30-60s | ~15ms (APFS clone) |
-| **Total restore** | **~40-70s** | **~15ms** |
+Benchmarks on a real Mill project (5.8GB, 268K files, 12K directories):
 
-The speedup comes from APFS copy-on-write semantics—no actual data is copied until files are modified.
+| Operation | Time |
+|-----------|------|
+| mv out/ to out.old/ | ~3ms |
+| cp -rc (APFS clone) | ~60s |
+| **Total restore** | **~60s** |
+
+### Why APFS Clone?
+
+We benchmarked several approaches for restoring 268K files:
+
+| Method | Time | Notes |
+|--------|------|-------|
+| **cp -rc** (APFS clone) | **60s** | Winner - no data copy, just metadata |
+| tar extract | 158s | 2.6x slower |
+| tar.zst extract | 148s | 2.5x slower |
+| ditto | 162s | 2.7x slower |
+
+**The bottleneck is filesystem metadata**, not I/O or CPU. Each of the 268K files requires a new inode and directory entry regardless of method. APFS clone avoids copying actual file data (copy-on-write), making it the fastest option.
+
+Compression doesn't help because:
+- System time dominates (~55s in kernel creating metadata)
+- User time is minimal (~0.4s)
+- Decompression adds CPU overhead without reducing metadata work
+
+### Alternatives Considered
+
+| Approach | Restore Time | Problem |
+|----------|--------------|---------|
+| Symlinks | ~0ms | Risky: Mill writes corrupt cache |
+| Hard links | ~0ms | Same issue as symlinks |
+| RAM disk | Fast | Not persistent across reboots |
+| Incremental | Varies | Complex to implement correctly |
+
+**Verdict**: APFS clone is optimal for this use case. The ~60s restore time is dominated by unavoidable filesystem operations.
