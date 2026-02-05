@@ -253,10 +253,12 @@ restore() {
 
   local start_time=$(date +%s.%N)
 
-  # Move-swap for instant restore (delete old in background)
-  local old_dir="out.old.$$"
-  debug "moving current out/ to $old_dir"
-  mv out "$old_dir" 2>/dev/null || true
+  # Move old out/ aside for GC (if exists)
+  if [[ -d out ]]; then
+    local old_dir="out.old.$$"
+    debug "moving current out/ to $old_dir"
+    mv out "$old_dir"
+  fi
 
   debug "cloning snapshot to out/"
   # Run cp in background with spinner
