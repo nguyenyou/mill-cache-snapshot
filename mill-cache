@@ -1,0 +1,308 @@
+#!/bin/bash
+set -euo pipefail
+
+# Config
+CACHE_ROOT="$HOME/.mill-out-cache"
+MAX_SNAPSHOTS=10
+MAX_SIZE_GB=50
+MAIN_BRANCH="master"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+get_project_name() {
+  # Try git remote first
+  local remote=$(git remote get-url origin 2>/dev/null || echo "")
+  if [[ -n "$remote" ]]; then
+    # Extract repo name from URL (handles both https and ssh)
+    basename -s .git "$remote"
+  else
+    # Fallback to directory name
+    basename "$(git rev-parse --show-toplevel)"
+  fi
+}
+
+PROJECT_NAME=$(get_project_name)
+CACHE_DIR="$CACHE_ROOT/$PROJECT_NAME"
+
+ensure_main_branch() {
+  local current=$(git rev-parse --abbrev-ref HEAD)
+  if [[ "$current" != "$MAIN_BRANCH" ]]; then
+    echo -e "${RED}Error: Must be on '$MAIN_BRANCH' branch (currently on '$current')${NC}"
+    exit 1
+  fi
+}
+
+sync_upstream() {
+  echo -e "${CYAN}Syncing with upstream/$MAIN_BRANCH...${NC}"
+  if ! git fetch upstream "$MAIN_BRANCH"; then
+    echo -e "${RED}Error: Failed to fetch upstream/$MAIN_BRANCH${NC}"
+    exit 1
+  fi
+  if ! git rebase "upstream/$MAIN_BRANCH" "$MAIN_BRANCH"; then
+    echo -e "${RED}Error: Failed to rebase on upstream/$MAIN_BRANCH${NC}"
+    git rebase --abort 2>/dev/null || true
+    exit 1
+  fi
+  echo -e "${GREEN}Synced to upstream/$MAIN_BRANCH${NC}"
+  echo ""
+}
+
+ensure_clean_worktree() {
+  if ! git diff --quiet; then
+    echo -e "${RED}Error: Unstaged changes present${NC}"
+    git status --short
+    exit 1
+  fi
+
+  if ! git diff --cached --quiet; then
+    echo -e "${RED}Error: Staged uncommitted changes present${NC}"
+    git status --short
+    exit 1
+  fi
+
+  # Check for untracked files in src dirs (optional, stricter)
+  local untracked=$(git ls-files --others --exclude-standard | grep -v '^out/' | head -5)
+  if [[ -n "$untracked" ]]; then
+    echo -e "${YELLOW}Warning: Untracked files present (ignored):${NC}"
+    echo "$untracked"
+  fi
+}
+
+get_cache_size_gb() {
+  du -sg "$CACHE_DIR" 2>/dev/null | cut -f1 || echo 0
+}
+
+get_snapshot_count() {
+  find "$CACHE_DIR" -maxdepth 1 -type d -name '[a-f0-9]*' 2>/dev/null | wc -l | tr -d ' '
+}
+
+prune_oldest() {
+  local reason=$1
+  local oldest=$(ls -1t "$CACHE_DIR" | grep -v index.txt | tail -1)
+  if [[ -n "$oldest" ]]; then
+    echo -e "${YELLOW}Pruning oldest snapshot ($reason): ${oldest:0:7}${NC}"
+    rm -rf "$CACHE_DIR/$oldest"
+    sed -i '' "/^$oldest/d" "$CACHE_DIR/index.txt" 2>/dev/null || true
+  fi
+}
+
+enforce_limits() {
+  while (( $(get_snapshot_count) > MAX_SNAPSHOTS )); do
+    prune_oldest "count > $MAX_SNAPSHOTS"
+  done
+
+  while (( $(get_cache_size_gb) > MAX_SIZE_GB )); do
+    prune_oldest "size > ${MAX_SIZE_GB}GB"
+  done
+}
+
+compile() {
+  echo -e "${CYAN}Running ./mill __.compile ...${NC}"
+  echo ""
+
+  if ! ./mill __.compile; then
+    echo -e "${RED}Error: Compilation failed, aborting snapshot${NC}"
+    exit 1
+  fi
+
+  echo ""
+  echo -e "${GREEN}Compilation successful${NC}"
+}
+
+snapshot() {
+  ensure_main_branch
+  ensure_clean_worktree
+  sync_upstream
+
+  local hash=$(git rev-parse HEAD)
+  local short=$(git rev-parse --short HEAD)
+  local dest="$CACHE_DIR/$hash"
+
+  if [[ -d "$dest" ]]; then
+    echo -e "${YELLOW}Snapshot already exists for $short${NC}"
+    status
+    return 0
+  fi
+
+  # Compile before snapshot
+  compile
+
+  if [[ ! -d out ]]; then
+    echo -e "${RED}Error: No 'out' directory after compile${NC}"
+    exit 1
+  fi
+
+  mkdir -p "$CACHE_DIR"
+
+  echo ""
+  echo "Creating snapshot for $short..."
+  cp -rc out "$dest"
+
+  # Update index
+  echo "$hash $(date -Iseconds) $(du -sh "$dest" | cut -f1)" >> "$CACHE_DIR/index.txt"
+
+  enforce_limits
+
+  echo -e "${GREEN}Snapshot created: $short${NC}"
+  status
+}
+
+restore() {
+  local target=$1
+
+  if [[ -z "$target" ]]; then
+    target=$(git log --format=%H "$MAIN_BRANCH" 2>/dev/null | while read h; do
+      [[ -d "$CACHE_DIR/$h" ]] && echo "$h" && break
+    done)
+
+    if [[ -z "$target" ]]; then
+      echo -e "${RED}Error: No cached snapshot found in commit history${NC}"
+      list
+      exit 1
+    fi
+  fi
+
+  # Allow partial hash match
+  if [[ -n "$target" && ${#target} -lt 40 ]]; then
+    local match=$(find "$CACHE_DIR" -maxdepth 1 -type d -name "${target}*" | head -1)
+    if [[ -n "$match" ]]; then
+      target=$(basename "$match")
+    else
+      echo -e "${RED}Error: No snapshot matching '$target'${NC}"
+      list
+      exit 1
+    fi
+  fi
+
+  if [[ -z "$target" || ! -d "$CACHE_DIR/$target" ]]; then
+    echo -e "${RED}Error: No cached snapshot found${NC}"
+    list
+    exit 1
+  fi
+
+  rm -rf out
+  cp -rc "$CACHE_DIR/$target" out
+
+  local short=${target:0:7}
+  local msg=$(git log -1 --format=%s "$target" 2>/dev/null || echo "")
+  echo -e "${GREEN}Restored${NC}: ${CYAN}$short${NC} - $msg"
+}
+
+list() {
+  echo ""
+  echo -e "Cached snapshots for ${CYAN}$PROJECT_NAME${NC}:"
+  echo "─────────────────────────────────────────────────────────────"
+
+  if [[ -f "$CACHE_DIR/index.txt" ]]; then
+    while read hash ts size; do
+      local short=${hash:0:7}
+      local msg=$(git log -1 --format=%s "$hash" 2>/dev/null || echo "???")
+      msg=${msg:0:42}
+      printf "  %s  %s  %5s  %s\n" "$short" "${ts:0:10}" "$size" "$msg"
+    done < <(tac "$CACHE_DIR/index.txt")
+  else
+    echo "  (none)"
+  fi
+
+  echo "─────────────────────────────────────────────────────────────"
+}
+
+list_all() {
+  echo ""
+  echo "All cached projects:"
+  echo "═════════════════════════════════════════════════════════════"
+
+  for project_dir in "$CACHE_ROOT"/*/; do
+    [[ ! -d "$project_dir" ]] && continue
+    local proj=$(basename "$project_dir")
+    local count=$(find "$project_dir" -maxdepth 1 -type d -name '[a-f0-9]*' 2>/dev/null | wc -l | tr -d ' ')
+    local size=$(du -sh "$project_dir" 2>/dev/null | cut -f1 || echo "0")
+
+    if [[ "$proj" == "$PROJECT_NAME" ]]; then
+      printf "  ${CYAN}%-20s${NC}  %3s snapshots  %6s  (current)\n" "$proj" "$count" "$size"
+    else
+      printf "  %-20s  %3s snapshots  %6s\n" "$proj" "$count" "$size"
+    fi
+  done
+
+  echo "═════════════════════════════════════════════════════════════"
+  printf "  %-20s  %3s snapshots  %6s\n" "TOTAL" \
+    "$(find "$CACHE_ROOT" -maxdepth 2 -type d -name '[a-f0-9]*' 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(du -sh "$CACHE_ROOT" 2>/dev/null | cut -f1 || echo 0)"
+}
+
+status() {
+  local count=$(get_snapshot_count)
+  local size=$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1 || echo "0")
+
+  echo ""
+  echo -e "${CYAN}Mill Out Cache${NC}: $PROJECT_NAME"
+  echo "────────────────────────────────────"
+  echo "  Location:   $CACHE_DIR"
+  echo "  Snapshots:  $count / $MAX_SNAPSHOTS"
+  echo "  Size:       $size / ${MAX_SIZE_GB}GB"
+  echo ""
+}
+
+clean() {
+  echo "Current cache for $PROJECT_NAME:"
+  status
+  echo ""
+  read -p "Delete ALL snapshots for $PROJECT_NAME? [y/N] " confirm
+  [[ "$confirm" == "y" ]] && rm -rf "$CACHE_DIR" && echo -e "${GREEN}Cleaned $PROJECT_NAME cache.${NC}"
+}
+
+clean_all() {
+  list_all
+  echo ""
+  read -p "Delete ALL snapshots for ALL projects? [y/N] " confirm
+  [[ "$confirm" == "y" ]] && rm -rf "$CACHE_ROOT" && echo -e "${GREEN}Cleaned all caches.${NC}"
+}
+
+usage() {
+  cat <<EOF
+Mill out/ cache manager (APFS clone-based)
+
+Current project: $PROJECT_NAME
+
+Usage: $(basename "$0") <command>
+
+Commands:
+  snapshot, s       Compile and snapshot current out/ (main branch, clean only)
+  restore, r        Restore nearest ancestor snapshot
+  restore <hash>    Restore specific snapshot (partial hash OK)
+  list, ls, l       List snapshots for current project
+  list-all, la      List all projects and their snapshots
+  status, st        Show cache stats for current project
+  clean             Delete all snapshots for current project
+  clean-all         Delete all snapshots for all projects
+
+Requirements for snapshot:
+  - Must be on '$MAIN_BRANCH' branch
+  - No uncommitted changes (staged or unstaged)
+  - Syncs to upstream/$MAIN_BRANCH before snapshot
+  - ./mill __.compile must succeed
+
+Config:
+  MAX_SNAPSHOTS=$MAX_SNAPSHOTS (per project)
+  MAX_SIZE_GB=$MAX_SIZE_GB (per project)
+  CACHE_ROOT=$CACHE_ROOT
+EOF
+}
+
+case "${1:-}" in
+  snapshot|s)   snapshot ;;
+  restore|r)    restore "${2:-}" ;;
+  list|ls|l)    list ;;
+  list-all|la)  list_all ;;
+  status|st)    status ;;
+  clean)        clean ;;
+  clean-all)    clean_all ;;
+  help|-h|--help) usage ;;
+  *)            usage ;;
+esac
