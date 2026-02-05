@@ -6,7 +6,7 @@ CACHE_ROOT="$HOME/.mill-out-cache"
 MAX_SNAPSHOTS=10
 MAX_SIZE_GB=50
 MAIN_BRANCH="master"
-DEBUG=${DEBUG:-0}
+DEBUG=${DEBUG:-1}
 
 debug() {
   [[ "$DEBUG" == "1" ]] && echo -e "${YELLOW}[debug]${NC} $*"
@@ -35,35 +35,43 @@ PROJECT_NAME=$(get_project_name)
 CACHE_DIR="$CACHE_ROOT/$PROJECT_NAME"
 
 ensure_main_branch() {
+  debug "ensure_main_branch: checking current branch"
   local current=$(git rev-parse --abbrev-ref HEAD)
+  debug "ensure_main_branch: current='$current', required='$MAIN_BRANCH'"
   if [[ "$current" != "$MAIN_BRANCH" ]]; then
     echo -e "${RED}Error: Must be on '$MAIN_BRANCH' branch (currently on '$current')${NC}"
     exit 1
   fi
+  debug "ensure_main_branch: OK"
 }
 
 sync_upstream() {
+  debug "sync_upstream: fetching upstream/$MAIN_BRANCH"
   echo -e "${CYAN}Syncing with upstream/$MAIN_BRANCH...${NC}"
   if ! git fetch upstream "$MAIN_BRANCH"; then
     echo -e "${RED}Error: Failed to fetch upstream/$MAIN_BRANCH${NC}"
     exit 1
   fi
+  debug "sync_upstream: rebasing onto upstream/$MAIN_BRANCH"
   if ! git rebase "upstream/$MAIN_BRANCH" "$MAIN_BRANCH"; then
     echo -e "${RED}Error: Failed to rebase on upstream/$MAIN_BRANCH${NC}"
     git rebase --abort 2>/dev/null || true
     exit 1
   fi
+  debug "sync_upstream: complete"
   echo -e "${GREEN}Synced to upstream/$MAIN_BRANCH${NC}"
   echo ""
 }
 
 ensure_clean_worktree() {
+  debug "ensure_clean_worktree: checking for unstaged changes"
   if ! git diff --quiet; then
     echo -e "${RED}Error: Unstaged changes present${NC}"
     git status --short
     exit 1
   fi
 
+  debug "ensure_clean_worktree: checking for staged changes"
   if ! git diff --cached --quiet; then
     echo -e "${RED}Error: Staged uncommitted changes present${NC}"
     git status --short
@@ -71,11 +79,13 @@ ensure_clean_worktree() {
   fi
 
   # Check for untracked files in src dirs (optional, stricter)
+  debug "ensure_clean_worktree: checking for untracked files"
   local untracked=$(git ls-files --others --exclude-standard | grep -v '^out/' | head -5)
   if [[ -n "$untracked" ]]; then
     echo -e "${YELLOW}Warning: Untracked files present (ignored):${NC}"
     echo "$untracked"
   fi
+  debug "ensure_clean_worktree: OK"
 }
 
 get_cache_size_gb() {
@@ -97,16 +107,20 @@ prune_oldest() {
 }
 
 enforce_limits() {
+  debug "enforce_limits: checking snapshot count (max=$MAX_SNAPSHOTS)"
   while (( $(get_snapshot_count) > MAX_SNAPSHOTS )); do
     prune_oldest "count > $MAX_SNAPSHOTS"
   done
 
+  debug "enforce_limits: checking cache size (max=${MAX_SIZE_GB}GB)"
   while (( $(get_cache_size_gb) > MAX_SIZE_GB )); do
     prune_oldest "size > ${MAX_SIZE_GB}GB"
   done
+  debug "enforce_limits: done"
 }
 
 compile() {
+  debug "compile: starting ./mill __.compile"
   echo -e "${CYAN}Running ./mill __.compile ...${NC}"
   echo ""
 
@@ -115,11 +129,13 @@ compile() {
     exit 1
   fi
 
+  debug "compile: successful"
   echo ""
   echo -e "${GREEN}Compilation successful${NC}"
 }
 
 snapshot() {
+  debug "snapshot: starting for project=$PROJECT_NAME"
   ensure_main_branch
   ensure_clean_worktree
   sync_upstream
@@ -127,8 +143,10 @@ snapshot() {
   local hash=$(git rev-parse HEAD)
   local short=$(git rev-parse --short HEAD)
   local dest="$CACHE_DIR/$hash"
+  debug "snapshot: hash=$short, dest=$dest"
 
   if [[ -d "$dest" ]]; then
+    debug "snapshot: already exists, skipping"
     echo -e "${YELLOW}Snapshot already exists for $short${NC}"
     status
     return 0
@@ -142,17 +160,21 @@ snapshot() {
     exit 1
   fi
 
+  debug "snapshot: creating cache dir $CACHE_DIR"
   mkdir -p "$CACHE_DIR"
 
   echo ""
   echo "Creating snapshot for $short..."
+  debug "snapshot: cloning out/ to $dest"
   cp -rc out "$dest"
 
   # Update index
+  debug "snapshot: updating index.txt"
   echo "$hash $(date -Iseconds) $(du -sh "$dest" | cut -f1)" >> "$CACHE_DIR/index.txt"
 
   enforce_limits
 
+  debug "snapshot: complete"
   echo -e "${GREEN}Snapshot created: $short${NC}"
   status
 }
@@ -219,11 +241,14 @@ restore() {
 }
 
 list() {
+  debug "list: showing snapshots for project=$PROJECT_NAME"
+  debug "list: cache_dir=$CACHE_DIR"
   echo ""
   echo -e "Cached snapshots for ${CYAN}$PROJECT_NAME${NC}:"
   echo "─────────────────────────────────────────────────────────────"
 
   if [[ -f "$CACHE_DIR/index.txt" ]]; then
+    debug "list: reading index.txt"
     while read hash ts size; do
       local short=${hash:0:7}
       local msg=$(git log -1 --format=%s "$hash" 2>/dev/null || echo "???")
@@ -231,6 +256,7 @@ list() {
       printf "  %s  %s  %5s  %s\n" "$short" "${ts:0:10}" "$size" "$msg"
     done < <(tac "$CACHE_DIR/index.txt")
   else
+    debug "list: no index.txt found"
     echo "  (none)"
   fi
 
@@ -238,6 +264,7 @@ list() {
 }
 
 list_all() {
+  debug "list_all: showing all projects in $CACHE_ROOT"
   echo ""
   echo "All cached projects:"
   echo "═════════════════════════════════════════════════════════════"
@@ -245,6 +272,7 @@ list_all() {
   for project_dir in "$CACHE_ROOT"/*/; do
     [[ ! -d "$project_dir" ]] && continue
     local proj=$(basename "$project_dir")
+    debug "list_all: scanning project=$proj"
     local count=$(find "$project_dir" -maxdepth 1 -type d -name '[a-f0-9]*' 2>/dev/null | wc -l | tr -d ' ')
     local size=$(du -sh "$project_dir" 2>/dev/null | cut -f1 || echo "0")
 
@@ -262,8 +290,10 @@ list_all() {
 }
 
 status() {
+  debug "status: getting stats for project=$PROJECT_NAME"
   local count=$(get_snapshot_count)
   local size=$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1 || echo "0")
+  debug "status: count=$count, size=$size"
 
   echo ""
   echo -e "${CYAN}Mill Out Cache${NC}: $PROJECT_NAME"
@@ -275,18 +305,34 @@ status() {
 }
 
 clean() {
+  debug "clean: preparing to clean project=$PROJECT_NAME"
+  debug "clean: target=$CACHE_DIR"
   echo "Current cache for $PROJECT_NAME:"
   status
   echo ""
   read -p "Delete ALL snapshots for $PROJECT_NAME? [y/N] " confirm
-  [[ "$confirm" == "y" ]] && rm -rf "$CACHE_DIR" && echo -e "${GREEN}Cleaned $PROJECT_NAME cache.${NC}"
+  if [[ "$confirm" == "y" ]]; then
+    debug "clean: confirmed, removing $CACHE_DIR"
+    rm -rf "$CACHE_DIR"
+    echo -e "${GREEN}Cleaned $PROJECT_NAME cache.${NC}"
+  else
+    debug "clean: cancelled by user"
+  fi
 }
 
 clean_all() {
+  debug "clean_all: preparing to clean all projects"
+  debug "clean_all: target=$CACHE_ROOT"
   list_all
   echo ""
   read -p "Delete ALL snapshots for ALL projects? [y/N] " confirm
-  [[ "$confirm" == "y" ]] && rm -rf "$CACHE_ROOT" && echo -e "${GREEN}Cleaned all caches.${NC}"
+  if [[ "$confirm" == "y" ]]; then
+    debug "clean_all: confirmed, removing $CACHE_ROOT"
+    rm -rf "$CACHE_ROOT"
+    echo -e "${GREEN}Cleaned all caches.${NC}"
+  else
+    debug "clean_all: cancelled by user"
+  fi
 }
 
 usage() {
@@ -318,8 +364,8 @@ Config:
   MAX_SIZE_GB=$MAX_SIZE_GB (per project)
   CACHE_ROOT=$CACHE_ROOT
 
-Debug mode:
-  DEBUG=1 $(basename "$0") restore    # verbose logging
+Debug mode (on by default):
+  DEBUG=0 $(basename "$0") restore    # disable verbose logging
 EOF
 }
 
