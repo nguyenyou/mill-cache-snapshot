@@ -28,12 +28,12 @@ The restore operation uses a move-swap pattern for maximum speed:
 ```bash
 mv out out.old.$$              # instant - just renames
 cp -rc "$snapshot" out         # instant - APFS clone
-rm -rf out.old.$$ &            # background - doesn't block
+# out.old.$$ left for GC to clean later
 ```
 
 **Result: 5.8GB restored in ~15ms**
 
-The old `out/` is renamed (instant), the snapshot is cloned (instant), and the old directory is deleted in the background while you continue working.
+The old `out/` is renamed (instant) and the snapshot is cloned (instant). The old directory is left for the garbage collector to clean up later, keeping the restore operation non-blocking.
 
 ### Automatic Ancestor Lookup
 
@@ -67,6 +67,9 @@ mill-cache status      # or: st
 mill-cache clean       # current project
 mill-cache clean-all   # all projects
 
+# Garbage collect old out/ dirs from restore
+mill-cache gc
+
 # Debug mode
 DEBUG=1 mill-cache restore
 ```
@@ -83,6 +86,27 @@ cp mill-cache ~/bin/
 chmod +x ~/bin/mill-cache
 ```
 
+### Automatic Garbage Collection (Optional)
+
+Install the launchd agent to run GC hourly:
+
+```bash
+cp com.mill-cache.gc.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.mill-cache.gc.plist
+```
+
+To check status:
+```bash
+launchctl list | grep mill-cache
+tail -f /tmp/mill-cache-gc.log
+```
+
+To uninstall:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.mill-cache.gc.plist
+rm ~/Library/LaunchAgents/com.mill-cache.gc.plist
+```
+
 ## Configuration
 
 Edit the top of the script:
@@ -92,6 +116,7 @@ CACHE_ROOT="$HOME/.mill-out-cache"  # where snapshots live
 MAX_SNAPSHOTS=10                     # per project limit
 MAX_SIZE_GB=50                       # per project limit
 MAIN_BRANCH="master"                 # branch for snapshots
+GC_TARGET_DIR="/path/to/project"    # where GC looks for out.old.* dirs
 ```
 
 ## Cache Structure

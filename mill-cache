@@ -7,6 +7,7 @@ MAX_SNAPSHOTS=10
 MAX_SIZE_GB=50
 MAIN_BRANCH="master"
 DEBUG=${DEBUG:-1}
+GC_TARGET_DIR="/Users/tunguyen/work/stargazer"
 
 debug() {
   [[ "$DEBUG" == "1" ]] && echo -e "${YELLOW}[debug]${NC} $*"
@@ -231,8 +232,8 @@ restore() {
   debug "cloning snapshot to out/"
   cp -rc "$CACHE_DIR/$target" out
 
-  debug "deleting $old_dir in background"
-  rm -rf "$old_dir" 2>/dev/null &
+  # Leave old_dir for GC to clean up later (no immediate delete)
+  debug "left $old_dir for garbage collection"
 
   local short=${target:0:7}
   local msg=$(git log -1 --format=%s "$target" 2>/dev/null || echo "")
@@ -335,6 +336,28 @@ clean_all() {
   fi
 }
 
+gc() {
+  debug "gc: scanning for garbage in $GC_TARGET_DIR"
+  local count=0
+  local total_size=0
+
+  # Find all out.old.* directories
+  while IFS= read -r -d '' dir; do
+    local size=$(du -sk "$dir" 2>/dev/null | cut -f1 || echo 0)
+    debug "gc: removing $dir (${size}K)"
+    rm -rf "$dir"
+    ((count++))
+    ((total_size += size))
+  done < <(find "$GC_TARGET_DIR" -maxdepth 1 -type d -name 'out.old.*' -print0 2>/dev/null)
+
+  if [[ $count -gt 0 ]]; then
+    local size_mb=$((total_size / 1024))
+    echo -e "${GREEN}GC: removed $count garbage dir(s), freed ${size_mb}MB${NC}"
+  else
+    debug "gc: no garbage found"
+  fi
+}
+
 usage() {
   cat <<EOF
 Mill out/ cache manager (APFS clone-based)
@@ -352,6 +375,7 @@ Commands:
   status, st        Show cache stats for current project
   clean             Delete all snapshots for current project
   clean-all         Delete all snapshots for all projects
+  gc                Garbage collect old out/ dirs from restore
 
 Requirements for snapshot:
   - Must be on '$MAIN_BRANCH' branch
@@ -377,6 +401,7 @@ case "${1:-}" in
   status|st)    status ;;
   clean)        clean ;;
   clean-all)    clean_all ;;
+  gc)           gc ;;
   help|-h|--help) usage ;;
   *)            usage ;;
 esac
