@@ -1,50 +1,214 @@
 #!/bin/bash
-# Show running Mill daemon processes with resource usage and project info
+# Mill daemon manager - list and kill Mill processes
 
-pids=$(pgrep -f "mill-runner-daemon")
+set -euo pipefail
 
-if [[ -z "$pids" ]]; then
-    echo "No Mill daemons running"
-    exit 0
-fi
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-count=$(echo "$pids" | wc -l | tr -d ' ')
-echo "$count Mill daemon(s) running:"
-echo
-
-printf "%-8s %-6s %-6s %s\n" "PID" "CPU%" "MEM%" "PROJECT"
-printf "%-8s %-6s %-6s %s\n" "---" "----" "----" "-------"
-
-for pid in $pids; do
-    stats=$(ps -p "$pid" -o %cpu,%mem | tail -1)
-    cpu=$(echo "$stats" | awk '{print $1}')
-    mem=$(echo "$stats" | awk '{print $2}')
-
-    cwd=$(lsof -p "$pid" 2>/dev/null | awk '/cwd/{print $9}')
+# Get daemon info for a PID
+get_daemon_info() {
+    local pid=$1
+    local stats=$(ps -p "$pid" -o %cpu,%mem 2>/dev/null | tail -1)
+    local cpu=$(echo "$stats" | awk '{print $1}')
+    local mem=$(echo "$stats" | awk '{print $2}')
+    local cwd=$(lsof -p "$pid" 2>/dev/null | awk '/cwd/{print $9}')
 
     # Extract project name
-    project_path=$(echo "$cwd" | sed 's|/\.bsp/.*||' | sed 's|/out/.*||')
-    project=$(basename "$project_path" 2>/dev/null)
+    local project_path=$(echo "$cwd" | sed 's|/\.bsp/.*||' | sed 's|/out/.*||')
+    local project=$(basename "$project_path" 2>/dev/null)
     [[ -z "$project" || "$project" == "." ]] && project="unknown"
 
     # Determine daemon type
+    local dtype=""
     if [[ "$cwd" == *"/.bsp/"* ]]; then
         if [[ "$cwd" == *"/mill-no-daemon/"* ]]; then
-            dtype="BSP/mill-no-daemon"
+            dtype="BSP/no-daemon"
         else
             dtype="BSP"
         fi
     elif [[ "$cwd" == *"/mill-daemon/"* ]]; then
-        dtype="mill-daemon"
+        dtype="daemon"
     elif [[ "$cwd" == *"/mill-no-daemon/"* ]]; then
-        dtype="mill-no-daemon"
-    else
-        dtype=""
+        dtype="no-daemon"
     fi
 
-    if [[ -n "$dtype" ]]; then
-        printf "%-8s %-6s %-6s %s (%s)\n" "$pid" "$cpu" "$mem" "$project" "$dtype"
-    else
-        printf "%-8s %-6s %-6s %s\n" "$pid" "$cpu" "$mem" "$project"
+    echo "$pid|$cpu|$mem|$project|$dtype"
+}
+
+# List all Mill daemons
+list_daemons() {
+    local pids=$(pgrep -f "mill-runner-daemon" 2>/dev/null || true)
+
+    if [[ -z "$pids" ]]; then
+        echo -e "${YELLOW}No Mill daemons running${NC}"
+        return 0
     fi
-done
+
+    local count=$(echo "$pids" | wc -l | tr -d ' ')
+    echo -e "${CYAN}$count Mill daemon(s) running:${NC}"
+    echo ""
+    printf "%-8s %-6s %-6s %-20s %s\n" "PID" "CPU%" "MEM%" "PROJECT" "TYPE"
+    printf "%-8s %-6s %-6s %-20s %s\n" "───" "────" "────" "───────" "────"
+
+    for pid in $pids; do
+        local info=$(get_daemon_info "$pid")
+        IFS='|' read -r p cpu mem project dtype <<< "$info"
+        if [[ -n "$dtype" ]]; then
+            printf "%-8s %-6s %-6s %-20s %s\n" "$p" "$cpu" "$mem" "$project" "$dtype"
+        else
+            printf "%-8s %-6s %-6s %-20s\n" "$p" "$cpu" "$mem" "$project"
+        fi
+    done
+}
+
+# Kill all Mill daemons
+kill_all() {
+    local pids=$(pgrep -f "mill-runner-daemon" 2>/dev/null || true)
+
+    if [[ -z "$pids" ]]; then
+        echo -e "${YELLOW}No Mill daemons running${NC}"
+        return 0
+    fi
+
+    echo -e "${CYAN}Killing all Mill daemons...${NC}"
+    local count=0
+    for pid in $pids; do
+        local info=$(get_daemon_info "$pid")
+        IFS='|' read -r p cpu mem project dtype <<< "$info"
+        if kill -9 "$pid" 2>/dev/null; then
+            echo -e "  ${RED}killed${NC} $pid ($project${dtype:+ - $dtype})"
+            ((count++))
+        fi
+    done
+    echo -e "${GREEN}Killed $count daemon(s)${NC}"
+}
+
+# Kill only BSP daemons
+kill_bsp() {
+    local pids=$(pgrep -f "mill-runner-daemon" 2>/dev/null || true)
+
+    if [[ -z "$pids" ]]; then
+        echo -e "${YELLOW}No Mill daemons running${NC}"
+        return 0
+    fi
+
+    echo -e "${CYAN}Killing BSP daemons...${NC}"
+    local count=0
+    for pid in $pids; do
+        local cwd=$(lsof -p "$pid" 2>/dev/null | awk '/cwd/{print $9}')
+        if [[ "$cwd" == *"/.bsp/"* ]]; then
+            local info=$(get_daemon_info "$pid")
+            IFS='|' read -r p cpu mem project dtype <<< "$info"
+            if kill -9 "$pid" 2>/dev/null; then
+                echo -e "  ${RED}killed${NC} $pid ($project - BSP)"
+                ((count++))
+            fi
+        fi
+    done
+
+    if [[ $count -eq 0 ]]; then
+        echo -e "${YELLOW}No BSP daemons found${NC}"
+    else
+        echo -e "${GREEN}Killed $count BSP daemon(s)${NC}"
+    fi
+}
+
+# Interactive kill - select which daemons to kill
+kill_select() {
+    local pids=$(pgrep -f "mill-runner-daemon" 2>/dev/null || true)
+
+    if [[ -z "$pids" ]]; then
+        echo -e "${YELLOW}No Mill daemons running${NC}"
+        return 0
+    fi
+
+    # Build arrays
+    local -a pid_arr=()
+    local -a info_arr=()
+
+    for pid in $pids; do
+        pid_arr+=("$pid")
+        info_arr+=("$(get_daemon_info "$pid")")
+    done
+
+    echo ""
+    echo -e "${CYAN}Mill daemons:${NC}"
+    echo "─────────────────────────────────────────────────────────────"
+    for i in "${!pid_arr[@]}"; do
+        IFS='|' read -r p cpu mem project dtype <<< "${info_arr[$i]}"
+        if [[ -n "$dtype" ]]; then
+            printf "  %2d) PID %-8s %-15s %s\n" "$((i+1))" "$p" "$project" "$dtype"
+        else
+            printf "  %2d) PID %-8s %s\n" "$((i+1))" "$p" "$project"
+        fi
+    done
+    echo "─────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Enter numbers to kill (space-separated), 'a' for all, or 'q' to quit:"
+    read -r selection
+
+    [[ "$selection" == "q" || -z "$selection" ]] && return 0
+
+    if [[ "$selection" == "a" ]]; then
+        for i in "${!pid_arr[@]}"; do
+            local pid=${pid_arr[$i]}
+            IFS='|' read -r p cpu mem project dtype <<< "${info_arr[$i]}"
+            if kill -9 "$pid" 2>/dev/null; then
+                echo -e "  ${RED}killed${NC} $pid ($project)"
+            fi
+        done
+        echo -e "${GREEN}Killed all${NC}"
+        return 0
+    fi
+
+    local killed=0
+    for num in $selection; do
+        if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#pid_arr[@]} )); then
+            local idx=$((num - 1))
+            local pid=${pid_arr[$idx]}
+            IFS='|' read -r p cpu mem project dtype <<< "${info_arr[$idx]}"
+            if kill -9 "$pid" 2>/dev/null; then
+                echo -e "  ${RED}killed${NC} $pid ($project)"
+                ((killed++))
+            fi
+        else
+            echo -e "  ${YELLOW}invalid: $num${NC}"
+        fi
+    done
+    [[ $killed -gt 0 ]] && echo -e "${GREEN}Killed $killed daemon(s)${NC}"
+}
+
+usage() {
+    cat <<EOF
+Mill daemon manager
+
+Usage: $(basename "$0") [command]
+
+Commands:
+  (none), ls, list  List running Mill daemons (default)
+  kill, k           Interactive: select which daemons to kill
+  kill-all, ka      Kill all Mill daemons
+  kill-bsp, kb      Kill only BSP daemons
+  help, -h          Show this help
+
+Examples:
+  mill-daemons              # list all daemons
+  mill-daemons kill         # interactive kill
+  mill-daemons ka           # kill all
+  mill-daemons kb           # kill BSP only
+EOF
+}
+
+case "${1:-}" in
+    ""|-l|ls|list)    list_daemons ;;
+    kill|k)           kill_select ;;
+    kill-all|ka)      kill_all ;;
+    kill-bsp|kb)      kill_bsp ;;
+    help|-h|--help)   usage ;;
+    *)                usage; exit 1 ;;
+esac
