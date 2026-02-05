@@ -6,6 +6,11 @@ CACHE_ROOT="$HOME/.mill-out-cache"
 MAX_SNAPSHOTS=10
 MAX_SIZE_GB=50
 MAIN_BRANCH="master"
+DEBUG=${DEBUG:-0}
+
+debug() {
+  [[ "$DEBUG" == "1" ]] && echo -e "${YELLOW}[debug]${NC} $*"
+}
 
 # Colors
 RED='\033[0;31m'
@@ -154,11 +159,17 @@ snapshot() {
 
 restore() {
   local target=$1
+  debug "restore called with target='$target'"
 
   if [[ -z "$target" ]]; then
-    target=$(git log --format=%H "$MAIN_BRANCH" 2>/dev/null | while read h; do
-      [[ -d "$CACHE_DIR/$h" ]] && echo "$h" && break
-    done)
+    debug "no target specified, searching git history for cached snapshot"
+    for h in $(git log --format=%H "$MAIN_BRANCH" 2>/dev/null); do
+      if [[ -d "$CACHE_DIR/$h" ]]; then
+        target=$h
+        break
+      fi
+    done
+    debug "found target from history: ${target:-none}"
 
     if [[ -z "$target" ]]; then
       echo -e "${RED}Error: No cached snapshot found in commit history${NC}"
@@ -169,9 +180,12 @@ restore() {
 
   # Allow partial hash match
   if [[ -n "$target" && ${#target} -lt 40 ]]; then
+    debug "partial hash provided, searching for match: $target*"
     local match=$(find "$CACHE_DIR" -maxdepth 1 -type d -name "${target}*" | head -1)
+    debug "match result: ${match:-none}"
     if [[ -n "$match" ]]; then
       target=$(basename "$match")
+      debug "resolved to full hash: $target"
     else
       echo -e "${RED}Error: No snapshot matching '$target'${NC}"
       list
@@ -185,11 +199,22 @@ restore() {
     exit 1
   fi
 
-  rm -rf out
+  debug "restoring from: $CACHE_DIR/$target"
+
+  # Move-swap for instant restore (delete old in background)
+  local old_dir="out.old.$$"
+  debug "moving current out/ to $old_dir"
+  mv out "$old_dir" 2>/dev/null || true
+
+  debug "cloning snapshot to out/"
   cp -rc "$CACHE_DIR/$target" out
+
+  debug "deleting $old_dir in background"
+  rm -rf "$old_dir" 2>/dev/null &
 
   local short=${target:0:7}
   local msg=$(git log -1 --format=%s "$target" 2>/dev/null || echo "")
+  debug "restore complete"
   echo -e "${GREEN}Restored${NC}: ${CYAN}$short${NC} - $msg"
 }
 
@@ -292,6 +317,9 @@ Config:
   MAX_SNAPSHOTS=$MAX_SNAPSHOTS (per project)
   MAX_SIZE_GB=$MAX_SIZE_GB (per project)
   CACHE_ROOT=$CACHE_ROOT
+
+Debug mode:
+  DEBUG=1 $(basename "$0") restore    # verbose logging
 EOF
 }
 
