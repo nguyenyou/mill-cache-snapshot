@@ -393,21 +393,6 @@ gc() {
   fi
 }
 
-gc_kick() {
-  debug "gc_kick: triggering launchd agent"
-  local service="gui/$(id -u)/com.mill-cache.gc"
-
-  if ! launchctl print "$service" &>/dev/null; then
-    echo -e "${RED}Error: GC agent not loaded. Install with:${NC}"
-    echo "  launchctl load ~/Library/LaunchAgents/com.mill-cache.gc.plist"
-    exit 1
-  fi
-
-  echo -e "${CYAN}Triggering GC agent...${NC}"
-  launchctl kickstart -k "$service"
-  echo -e "${GREEN}GC triggered in background${NC}"
-}
-
 usage() {
   cat <<EOF
 Mill out/ cache manager (APFS clone-based)
@@ -426,7 +411,6 @@ Commands:
   clean             Delete all snapshots for current project
   clean-all         Delete all snapshots for all projects
   gc                Garbage collect old out/ dirs from restore
-  gc-kick, gck      Trigger launchd GC agent immediately
 
 Requirements for snapshot:
   - Must be on '$MAIN_BRANCH' branch
@@ -453,7 +437,6 @@ case "${1:-}" in
   clean)        clean ;;
   clean-all)    clean_all ;;
   gc)           gc ;;
-  gc-kick|gck)  gc_kick ;;
   help|-h|--help) usage ;;
   *)            usage ;;
 esac

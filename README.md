@@ -84,27 +84,6 @@ cp mill-cache ~/bin/
 chmod +x ~/bin/mill-cache
 ```
 
-### Automatic Garbage Collection (Optional)
-
-Install the launchd agent to run GC hourly:
-
-```bash
-cp com.mill-cache.gc.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.mill-cache.gc.plist
-```
-
-To check status:
-```bash
-launchctl list | grep mill-cache
-tail -f /tmp/mill-cache-gc.log
-```
-
-To uninstall:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.mill-cache.gc.plist
-rm ~/Library/LaunchAgents/com.mill-cache.gc.plist
-```
-
 ## Configuration
 
 Edit the top of the script:

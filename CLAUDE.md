@@ -39,7 +39,7 @@ Single bash script (`mill-cache`) with these main functions:
 
 - **snapshot**: Enforces main branch + clean worktree → syncs upstream → runs `./mill __.compile` → copies `out/` to `~/.mill-out-cache/<project>/<full-hash>/`
 - **restore**: Finds nearest ancestor snapshot in git history, or restores specific hash (partial match supported). Renames old `out/` to `out.old.*` for GC.
-- **gc**: Cleans up `out.old.*` directories left by restore. Can be run manually or via launchd hourly.
+- **gc**: Cleans up `out.old.*` directories left by restore.
 - **enforce_limits**: Auto-prunes oldest snapshots when count > 10 or size > 50GB per project
 
 Cache structure:
@@ -64,11 +64,3 @@ cp mill-cache ~/bin/mill-cache
 - `MAX_SIZE_GB=50` per project
 - `MAIN_BRANCH="master"`
 - `GC_TARGET_DIR` - directory where GC looks for `out.old.*` garbage
-
-## Launchd GC Agent
-
-Install for hourly automatic garbage collection:
-```bash
-cp com.mill-cache.gc.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.mill-cache.gc.plist
-```
