@@ -13,6 +13,33 @@ debug() {
   [[ "$DEBUG" == "1" ]] && echo -e "${YELLOW}[debug]${NC} $*"
 }
 
+# Spinner with elapsed time - runs until background job completes
+spin_while() {
+  local pid=$1
+  local msg=$2
+  local spinchars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  local start=$(date +%s)
+
+  # Hide cursor
+  tput civis 2>/dev/null || true
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(($(date +%s) - start))
+    local spin=${spinchars:i%${#spinchars}:1}
+    printf "\r${CYAN}%s${NC} %s ${YELLOW}%ds${NC}  " "$spin" "$msg" "$elapsed"
+    ((i++))
+    sleep 0.1
+  done
+
+  # Show cursor, clear line
+  tput cnorm 2>/dev/null || true
+  printf "\r\033[K"
+
+  # Return the exit status of the background process
+  wait "$pid"
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -232,7 +259,10 @@ restore() {
   mv out "$old_dir" 2>/dev/null || true
 
   debug "cloning snapshot to out/"
-  cp -rc "$CACHE_DIR/$target" out
+  # Run cp in background with spinner
+  cp -rc "$CACHE_DIR/$target" out &
+  local cp_pid=$!
+  spin_while "$cp_pid" "Restoring ${target:0:7}..."
 
   # Leave old_dir for GC to clean up later (no immediate delete)
   debug "left $old_dir for garbage collection"
