@@ -1,0 +1,50 @@
+#!/bin/bash
+# Show running Mill daemon processes with resource usage and project info
+
+pids=$(pgrep -f "mill-runner-daemon")
+
+if [[ -z "$pids" ]]; then
+    echo "No Mill daemons running"
+    exit 0
+fi
+
+count=$(echo "$pids" | wc -l | tr -d ' ')
+echo "$count Mill daemon(s) running:"
+echo
+
+printf "%-8s %-6s %-6s %s\n" "PID" "CPU%" "MEM%" "PROJECT"
+printf "%-8s %-6s %-6s %s\n" "---" "----" "----" "-------"
+
+for pid in $pids; do
+    stats=$(ps -p "$pid" -o %cpu,%mem | tail -1)
+    cpu=$(echo "$stats" | awk '{print $1}')
+    mem=$(echo "$stats" | awk '{print $2}')
+
+    cwd=$(lsof -p "$pid" 2>/dev/null | awk '/cwd/{print $9}')
+
+    # Extract project name
+    project_path=$(echo "$cwd" | sed 's|/\.bsp/.*||' | sed 's|/out/.*||')
+    project=$(basename "$project_path" 2>/dev/null)
+    [[ -z "$project" || "$project" == "." ]] && project="unknown"
+
+    # Determine daemon type
+    if [[ "$cwd" == *"/.bsp/"* ]]; then
+        if [[ "$cwd" == *"/mill-no-daemon/"* ]]; then
+            dtype="BSP/mill-no-daemon"
+        else
+            dtype="BSP"
+        fi
+    elif [[ "$cwd" == *"/mill-daemon/"* ]]; then
+        dtype="mill-daemon"
+    elif [[ "$cwd" == *"/mill-no-daemon/"* ]]; then
+        dtype="mill-no-daemon"
+    else
+        dtype=""
+    fi
+
+    if [[ -n "$dtype" ]]; then
+        printf "%-8s %-6s %-6s %s (%s)\n" "$pid" "$cpu" "$mem" "$project" "$dtype"
+    else
+        printf "%-8s %-6s %-6s %s\n" "$pid" "$cpu" "$mem" "$project"
+    fi
+done
