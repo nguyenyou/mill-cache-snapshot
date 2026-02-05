@@ -266,9 +266,6 @@ restore() {
   local cp_pid=$!
   spin_while "$cp_pid" "Restoring ${target:0:7}..."
 
-  # Leave old_dir for GC to clean up later (no immediate delete)
-  debug "left $old_dir for garbage collection"
-
   local end_time=$(date +%s.%N)
   local elapsed=$(echo "$end_time - $start_time" | bc)
 
