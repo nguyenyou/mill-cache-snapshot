@@ -192,9 +192,10 @@ snapshot() {
   mkdir -p "$CACHE_DIR"
 
   echo ""
-  echo "Creating snapshot for $short..."
   debug "snapshot: cloning out/ to $dest"
-  cp -rc out "$dest"
+  cp -rc out "$dest" &
+  local cp_pid=$!
+  spin_while "$cp_pid" "Snapshotting $short..."
 
   # Update index
   debug "snapshot: updating index.txt"
